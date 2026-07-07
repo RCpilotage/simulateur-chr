@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { Printer, RotateCcw, ArrowRight, TrendingUp, TrendingDown, ArrowLeft, Trash2, Save, Clock, Info } from "lucide-react";
+import { Printer, RotateCcw, ArrowRight, TrendingUp, TrendingDown, ArrowLeft, Trash2, Save, Clock, Info, LogOut } from "lucide-react";
 import * as db from "./db";
 
 /* ============================================================
@@ -1120,6 +1120,72 @@ function BilanAnnuel() {
   );
 }
 
+/* ======================= CONNEXION ======================= */
+function LoginGate({ onDone }) {
+  const [step, setStep] = useState("email");
+  const [email, setEmail] = useState("");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const libErr = (ex) => {
+    const m = (ex && (ex.message || String(ex))) || "";
+    if (/rate limit/i.test(m)) return "Limite d'envoi d'emails atteinte. Patientez une heure, puis réessayez.";
+    if (/expired|invalid/i.test(m)) return "Code invalide ou expiré. Demandez un nouveau code.";
+    if (/signups not allowed/i.test(m)) return "Les inscriptions sont désactivées côté Supabase.";
+    return m || "Erreur inattendue. Réessayez.";
+  };
+
+  const envoyer = async () => {
+    const e = email.trim().toLowerCase();
+    if (!/^\S+@\S+\.\S+$/.test(e)) { setErr("Adresse email invalide."); return; }
+    setBusy(true); setErr("");
+    try { await db.sendCode(e); setEmail(e); setCode(""); setStep("code"); }
+    catch (ex) { setErr(libErr(ex)); }
+    finally { setBusy(false); }
+  };
+
+  const valider = async () => {
+    if (code.length < 6) { setErr("Le code comporte 6 chiffres."); return; }
+    setBusy(true); setErr("");
+    try { await db.verifyCode(email, code); await onDone(); }
+    catch (ex) { setErr(libErr(ex)); setBusy(false); }
+  };
+
+  return (
+    <div className="login">
+      <div className="login-card">
+        <p className="login-eyeb">Simulateur de performance CHR</p>
+        <h1 className="login-t">Vos chiffres vous <i>suivent</i>.</h1>
+        {step === "email" ? (
+          <>
+            <p className="login-d">Connectez-vous par email. Vous recevez un code à usage unique, sans mot de passe. Vos données se retrouvent sur tous vos appareils.</p>
+            <label className="login-lab" htmlFor="lg-email">Adresse email</label>
+            <input id="lg-email" className="login-in" type="email" inputMode="email" autoComplete="email" autoFocus value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") envoyer(); }} />
+            <button className="login-btn" onClick={envoyer} disabled={busy}>{busy ? "Envoi…" : "Recevoir le code"}</button>
+          </>
+        ) : (
+          <>
+            <p className="login-d">Code envoyé à <b>{email}</b>. Consultez votre boîte de réception, puis saisissez le code ci-dessous.</p>
+            <label className="login-lab" htmlFor="lg-code">Code à 6 chiffres</label>
+            <input id="lg-code" className="login-in login-code" inputMode="numeric" autoComplete="one-time-code" autoFocus value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              onKeyDown={(e) => { if (e.key === "Enter") valider(); }} />
+            <button className="login-btn" onClick={valider} disabled={busy}>{busy ? "Vérification…" : "Se connecter"}</button>
+            <div className="login-alt">
+              <button onClick={() => { setStep("email"); setErr(""); }} disabled={busy}>Changer d'email</button>
+              <button onClick={envoyer} disabled={busy}>Renvoyer le code</button>
+            </div>
+          </>
+        )}
+        {err && <p className="login-err">{err}</p>}
+      </div>
+    </div>
+  );
+}
+
 /* ======================= APP ======================= */
 export default function App() {
   const theme = "noir";
@@ -1131,31 +1197,36 @@ export default function App() {
   const [prevResult, setPrevResult] = useState(null);
   const [historique, setHistorique] = useState([]);
   const [saved, setSaved] = useState(false);
-  const [ready, setReady] = useState(false);
+  const [auth, setAuth] = useState("loading"); // loading | login | ready | error
+  const [userEmail, setUserEmail] = useState(null);
   const [dbError, setDbError] = useState(null);
 
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        await db.init();
-        const rows = await db.listAnalyses();
-        if (!alive) return;
-        setHistorique(rows.map((r) => ({
-          id: r.id,
-          date: (r.donnees && r.donnees.date) || r.dateIso,
-          inputs: r.donnees && r.donnees.inputs,
-          scoreGlobal: r.score,
-          caTotal: r.donnees && r.donnees.caTotal,
-          bandLabel: r.donnees && r.donnees.bandLabel,
-        })));
-        setReady(true);
-      } catch (e) {
-        if (alive) setDbError(e.message || String(e));
-      }
-    })();
-    return () => { alive = false; };
-  }, []);
+  const boot = async () => {
+    try {
+      const s = await db.init();
+      if (!s.authenticated) { setAuth("login"); return; }
+      setUserEmail(s.email);
+      const rows = await db.listAnalyses();
+      setHistorique(rows.map((r) => ({
+        id: r.id,
+        date: (r.donnees && r.donnees.date) || r.dateIso,
+        inputs: r.donnees && r.donnees.inputs,
+        scoreGlobal: r.score,
+        caTotal: r.donnees && r.donnees.caTotal,
+        bandLabel: r.donnees && r.donnees.bandLabel,
+      })));
+      setAuth("ready");
+    } catch (e) {
+      setDbError(e.message || String(e));
+      setAuth("error");
+    }
+  };
+  useEffect(() => { boot(); }, []);
+
+  const deconnexion = async () => {
+    await db.signOut();
+    if (typeof window !== "undefined") window.location.reload();
+  };
 
   const setField = (k, v) => setInputs((s) => ({ ...s, [k]: v }));
   const caTotalLive = num(inputs.caNourriture) + num(inputs.caBoissons);
@@ -1180,7 +1251,7 @@ export default function App() {
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } catch (e) {
-      setDbError(e.message || String(e));
+      setDbError(e.message || String(e)); setAuth("error");
     }
   };
   const charger = (entry) => {
@@ -1189,28 +1260,36 @@ export default function App() {
   };
   const supprimer = async (id) => {
     try { await db.removeAnalyse(id); setHistorique((h) => h.filter((e) => e.id !== id)); }
-    catch (e) { setDbError(e.message || String(e)); }
+    catch (e) { setDbError(e.message || String(e)); setAuth("error"); }
   };
 
   const themeVars = THEMES[theme].vars;
 
-  if (dbError) {
+  if (auth === "error") {
     return (
       <div className="rc-root" style={themeVars}>
         <style>{CSS}</style>
         <div className="boot"><div className="boot-card">
           <p className="boot-t">Connexion à la base impossible</p>
           <p className="boot-d">{dbError}</p>
-          <p className="boot-d">Vérifiez que l'authentification anonyme est activée dans Supabase : Authentication, Sign In / Providers, Anonymous sign-ins.</p>
+          <p className="boot-d">Vérifiez votre connexion internet, puis rechargez la page.</p>
         </div></div>
       </div>
     );
   }
-  if (!ready) {
+  if (auth === "loading") {
     return (
       <div className="rc-root" style={themeVars}>
         <style>{CSS}</style>
         <div className="boot"><div className="boot-card"><p className="boot-t">Connexion…</p></div></div>
+      </div>
+    );
+  }
+  if (auth === "login") {
+    return (
+      <div className="rc-root" style={themeVars}>
+        <style>{CSS}</style>
+        <LoginGate onDone={boot} />
       </div>
     );
   }
@@ -1230,9 +1309,14 @@ export default function App() {
           <button className={`mode-pill ${mode === "matiere" ? "on" : ""}`} onClick={() => setMode("matiere")}>Matière au réel</button>
           <button className={`mode-pill ${mode === "bilan" ? "on" : ""}`} onClick={() => setMode("bilan")}>Bilan annuel</button>
         </div>
-        <button className="histo-btn" onClick={() => { setMode("annuel"); setView("historique"); }}>
-          <Clock size={14} /> Historique{historique.length > 0 ? ` (${historique.length})` : ""}
-        </button>
+        <div className="hdr-right">
+          <button className="histo-btn" onClick={() => { setMode("annuel"); setView("historique"); }}>
+            <Clock size={14} /> Historique{historique.length > 0 ? ` (${historique.length})` : ""}
+          </button>
+          <button className="histo-btn hdr-out" title={userEmail ? `Connecté : ${userEmail}. Se déconnecter de cet appareil.` : "Se déconnecter"} onClick={deconnexion}>
+            <LogOut size={14} />
+          </button>
+        </div>
       </header>
 
       {mode === "annuel" && view === "form" && (
@@ -1824,6 +1908,24 @@ const CSS = `
 .boot-card{max-width:460px;text-align:center;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:30px 28px}
 .boot-t{font-family:'Cormorant Garamond',serif;font-size:24px;color:var(--text);margin:0 0 10px}
 .boot-d{font-size:13.5px;color:var(--muted);line-height:1.6;margin:7px 0 0;word-break:break-word}
+.hdr-right{display:flex;align-items:center;gap:8px}
+.hdr-out{padding:9px 11px}
+.login{min-height:70vh;display:flex;align-items:center;justify-content:center;padding:44px 20px}
+.login-card{width:100%;max-width:420px;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:34px 30px}
+.login-eyeb{font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--faint);margin:0 0 12px}
+.login-t{font-family:'Cormorant Garamond',serif;font-size:30px;line-height:1.12;font-weight:600;color:var(--text);margin:0 0 12px}
+.login-d{font-size:13.5px;color:var(--muted);line-height:1.65;margin:0 0 18px}
+.login-d b{color:var(--text);font-weight:600}
+.login-lab{display:block;font-size:12px;color:var(--muted);margin:0 0 6px}
+.login-in{width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border2);border-radius:10px;padding:12px 14px;color:var(--text);font-size:15px;outline:none;font-family:inherit}
+.login-in:focus{border-color:var(--muted)}
+.login-code{letter-spacing:8px;font-size:20px;text-align:center;font-variant-numeric:tabular-nums}
+.login-btn{width:100%;margin-top:14px;background:var(--text);color:var(--bg);border:none;border-radius:10px;padding:12px 14px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit}
+.login-btn:disabled{opacity:.55;cursor:default}
+.login-err{color:var(--red);font-size:13px;margin:12px 0 0;line-height:1.5}
+.login-alt{display:flex;gap:18px;justify-content:center;margin-top:14px}
+.login-alt button{background:none;border:none;color:var(--faint);font-size:12.5px;cursor:pointer;text-decoration:underline;text-underline-offset:3px;padding:0;font-family:inherit}
+.login-alt button:hover{color:var(--muted)}
 
 .bilan-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:13px;background:var(--surface);scrollbar-width:none;-ms-overflow-style:none}
 .bilan-wrap::-webkit-scrollbar{display:none}

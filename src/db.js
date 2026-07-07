@@ -4,9 +4,9 @@
 //  Remplace le localStorage par une persistance reseau, scopee a un
 //  etablissement et protegee par la securite RLS.
 //
-//  Authentification : anonyme (prototype). Chaque navigateur recoit un
-//  utilisateur anonyme persistant ; ses donnees lui sont rattachees.
-//  Evolution prevue : passage a l'e-mail pour le multi-appareil.
+//  Authentification : par e-mail avec code a usage unique (OTP).
+//  La session est persistante par appareil ; les donnees suivent
+//  l'utilisateur sur tous ses appareils.
 // =====================================================================
 import { supabase } from "./supabaseClient";
 
@@ -14,16 +14,23 @@ let _etabId = null;
 export function etablissementId() { return _etabId; }
 
 // ---------------------------------------------------------------------
-//  Initialisation : session anonyme + etablissement courant.
-//  A appeler une fois au demarrage de l'appli, avant tout chargement.
+//  Initialisation. A appeler une fois au demarrage, avant tout
+//  chargement. Retourne { authenticated, email }.
+//  - Pas de session, ou session anonyme heritee de l'ancienne version :
+//    on repart proprement et l'appli affiche l'ecran de connexion.
+//  - Session e-mail valide : on garantit l'etablissement courant.
 // ---------------------------------------------------------------------
 export async function init() {
   const { data: { session } } = await supabase.auth.getSession();
-  if (!session) {
-    const { error } = await supabase.auth.signInAnonymously();
-    if (error) throw error;
+  if (!session || session.user?.is_anonymous) {
+    if (session) { try { await supabase.auth.signOut({ scope: "local" }); } catch (_) {} }
+    return { authenticated: false, email: null };
   }
+  await ensureEtablissement(session.user.id);
+  return { authenticated: true, email: session.user.email || null };
+}
 
+async function ensureEtablissement(userId) {
   const { data: etabs, error: e1 } = await supabase
     .from("etablissements").select("id").limit(1);
   if (e1) throw e1;
@@ -31,16 +38,38 @@ export async function init() {
   if (etabs && etabs.length) {
     _etabId = etabs[0].id;
   } else {
-    const { data: { user } } = await supabase.auth.getUser();
     const { data: created, error: e2 } = await supabase
       .from("etablissements")
-      .insert({ owner: user.id, nom: "Mon etablissement" })
+      .insert({ owner: userId, nom: "Mon etablissement" })
       .select("id").single();
     if (e2) throw e2;
     _etabId = created.id;
     await supabase.from("parametres").insert({ etablissement_id: _etabId });
   }
   return _etabId;
+}
+
+// ---------------------------------------------------------------------
+//  Connexion par e-mail : envoi du code, verification, deconnexion.
+//  scope "local" a la deconnexion : ne coupe que cet appareil,
+//  les sessions ouvertes ailleurs restent valides.
+// ---------------------------------------------------------------------
+export async function sendCode(email) {
+  const { error } = await supabase.auth.signInWithOtp({
+    email,
+    options: { shouldCreateUser: true },
+  });
+  if (error) throw error;
+}
+
+export async function verifyCode(email, token) {
+  const { data, error } = await supabase.auth.verifyOtp({ email, token, type: "email" });
+  if (error) throw error;
+  return data;
+}
+
+export async function signOut() {
+  try { await supabase.auth.signOut({ scope: "local" }); } catch (_) {}
 }
 
 // ---------------------------------------------------------------------
